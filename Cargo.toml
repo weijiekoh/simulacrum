@@ -2,6 +2,10 @@
 name = "simulacrum"
 version = "0.1.0"
 edition = "2024"
+authors = ["Koh Wei Jie <contact@kohweijie.com>"]
+description = "A developer-friendly Ethereum transaction simulation library"
+readme = "README.md"
+repository = "https://github.com/weijiekoh/simulacrum"
 
 [dependencies]
 alloy = { version = "1.0.24", features = ["rlp"] }

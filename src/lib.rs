@@ -11,18 +11,9 @@ use revm::{Context, Database, ExecuteCommitEvm, MainBuilder, MainContext};
 use std::sync::Arc;
 
 /* TODO:
-Simulate a transaction:
-    - EVMSimulator::execute(state: &mut State, transaction: Transaction) -> Result<(), Error>
-
-Call an arbitrary contract method:
-    - EVMSimulator::call(contract_address: Address, abi: Abi, method_name: String, params: Vec<Value>) -> Result<Value, Error>
-    - (TODO: use alloy's sol! macro to generate ABI calls)
-
-Fetch the contents of an arbitrary storage slot:
-    - EVMSimulator::get_storage_at(address: Address, slot: U256) -> Result<U256, Error>
-
-Fetch the ERC20 balance of an address (convenience method):
-    - EVMSimulator::get_erc20_balance(token_address: Address, owner: Address) -> Result<U256, Error>
+- [ ] Arbitrary contract calls
+- [ ] Arbitrary transaction execution
+- [ ] ERC20 balance queries, approvals, and transfers (convenience functions)
 */
 
 pub type HttpProvider = RootProvider<Ethereum>;
