@@ -1,0 +1,20 @@
+[package]
+name = "simulacrum"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alloy = { version = "1.0.24", features = ["rlp"] }
+alloy-eips = "1.0.24"
+anyhow = "1.0.99"
+ethers = "2.0.14"
+revm = "28.0.1"
+revm-context = "9.0.1"
+revm-database = { version = "7.0.4", features = ["alloydb"] }
+revm-primitives = "20.2.1"
+tokio = { version = "1.47.1", features = ["rt-multi-thread"] }
+tracing = "0.1.41"
+
+[dev-dependencies]
+rand = "0.8.5"
+rand_chacha = "0.3.1"
