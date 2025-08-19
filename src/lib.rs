@@ -1,8 +1,8 @@
 use alloy::eips::BlockId;
 use alloy::network::Ethereum;
-use alloy::primitives::{Address, KECCAK256_EMPTY, U256, Uint};
+use alloy::primitives::{Address, KECCAK256_EMPTY, U256};
 use alloy::providers::{Provider, RootProvider};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use revm::context::result::{EVMError, ExecutionResult};
 use revm::database::{AlloyDB, CacheDB, DBTransportError, WrapDatabaseAsync};
 use revm::primitives::{TxKind, hash_map::Entry};
@@ -22,17 +22,17 @@ pub struct EVMSimulator {
     pub provider: Arc<RootProvider<Ethereum>>,
     pub chain_id: u64,
     pub block_number: u64,
-    db: Option<CacheDB<WrapDatabaseAsync<AlloyDB<Ethereum, Arc<RootProvider<Ethereum>>>>>>,
+    db: CacheDB<WrapDatabaseAsync<AlloyDB<Ethereum, Arc<RootProvider<Ethereum>>>>>,
 }
 
 impl EVMSimulator {
     fn insert_account_info(&mut self, address: Address, info: AccountInfo) {
-        let db = self.db.as_mut().expect("DB missing");
+        let db = &mut self.db;
         db.cache.accounts.insert(address, info.into());
     }
 
-    fn query_rpc_or_retrive(&mut self, address: Address) -> Result<AccountInfo> {
-        let db = self.db.as_mut().expect("DB missing");
+    fn query_rpc_or_retrieve(&mut self, address: Address) -> Result<AccountInfo> {
+        let db = &mut self.db;
         // TODO: Handle the case where the account is not found in the local cache
         Ok(db.basic(address)?.unwrap())
     }
@@ -52,7 +52,7 @@ impl EVMSimulator {
         } else {
             let given_cid = chain_id.unwrap();
             if given_cid != provider_cid {
-                return Err(anyhow::anyhow!(
+                return Err(anyhow!(
                     "Chain ID mismatch: expected {}, got {}",
                     provider_cid,
                     given_cid
@@ -68,7 +68,7 @@ impl EVMSimulator {
         } else {
             let given_bn = block_number.unwrap();
             if given_bn > latest_block_number {
-                return Err(anyhow::anyhow!(
+                return Err(anyhow!(
                     "Block number mismatch: expected at most {}, got {}",
                     latest_block_number,
                     given_bn
@@ -88,7 +88,7 @@ impl EVMSimulator {
             provider: provider_arc,
             chain_id: cid,
             block_number: bn,
-            db: Some(cache_db),
+            db: cache_db,
         })
     }
 
@@ -97,15 +97,15 @@ impl EVMSimulator {
         &mut self,
         from: Address,
         to: Address,
-        value: Uint<256, 4>, // in wei
+        value: U256,
         gas_price: u128,
     ) -> Result<ExecutionResult, EVMError<DBTransportError>> {
         // Get balances and nonce before transaction (will lazy load from RPC)
-        let sender_info = self.query_rpc_or_retrive(from).unwrap();
+        let sender_info = self.query_rpc_or_retrieve(from).unwrap();
         let sender_nonce = sender_info.nonce;
 
-        let mut db = self.db.as_mut().expect("DB missing");
-        let mut evm = Context::mainnet().with_db(&mut db).build_mainnet();
+        let db = &mut self.db;
+        let mut evm = Context::mainnet().with_db(db).build_mainnet();
 
         // Update transaction in the same EVM instance
         evm.ctx.tx.caller = from;
@@ -120,17 +120,12 @@ impl EVMSimulator {
     }
 
     pub fn get_balance(&mut self, address: Address) -> Result<U256> {
-        let mut db = self.db.take().expect("DB missing");
-        let account_info = db.basic(address)?;
-        self.db = Some(db); // Restore the DB after use
-        match account_info {
-            Some(info) => Ok(info.balance),
-            None => Ok(U256::ZERO),
-        }
+        let db = &mut self.db;
+        Ok(db.basic(address)?.map(|i| i.balance).unwrap_or_default())
     }
 
     pub fn set_balance(&mut self, address: Address, balance: U256) {
-        let db = self.db.as_mut().expect("DB missing");
+        let db = &mut self.db;
 
         match db.cache.accounts.entry(address) {
             Entry::Occupied(mut entry) => {
@@ -147,14 +142,14 @@ impl EVMSimulator {
             }
         }
 
-        let mut info = self.query_rpc_or_retrive(address).unwrap();
+        let mut info = self.query_rpc_or_retrieve(address).unwrap();
         info.balance = balance;
 
         self.insert_account_info(address, info);
     }
 
     pub fn is_account_vacant(&mut self, address: Address) -> Result<bool> {
-        let db = self.db.as_mut().expect("DB missing");
+        let db = &mut self.db;
         let x = match db.cache.accounts.entry(address) {
             Entry::Occupied(_) => false,
             Entry::Vacant(_) => {
