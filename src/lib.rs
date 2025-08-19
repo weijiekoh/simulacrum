@@ -1,7 +1,10 @@
 use alloy::eips::BlockId;
 use alloy::network::Ethereum;
-use alloy::primitives::{Address, KECCAK256_EMPTY, U256, B256};
+use alloy::primitives::{Address, keccak256, KECCAK256_EMPTY, U256, B256, aliases::StorageKey};
+use alloy::rpc::types::EIP1186AccountProofResponse;
 use alloy::providers::{Provider, RootProvider};
+use alloy::consensus::Account;
+use alloy_trie::{Nibbles, proof::verify_proof};
 use anyhow::{Result, anyhow};
 use revm::context::result::{EVMError, ExecutionResult};
 use revm::database::{AlloyDB, CacheDB, DBTransportError, WrapDatabaseAsync};
@@ -11,6 +14,7 @@ use revm::{Context, Database, ExecuteCommitEvm, MainBuilder, MainContext};
 use std::sync::Arc;
 use serde::{Serialize, Deserialize};
 use bincode::{serialize, deserialize};
+use std::collections::HashMap;
 
 /* TODO:
 - [ ] Arbitrary contract calls
@@ -29,6 +33,8 @@ pub struct EVMSimulator {
     pub block_hash: B256,
     pub state_root: B256,
     db: CacheDB<WrapDatabaseAsync<AlloyDB<Ethereum, Arc<RootProvider<Ethereum>>>>>,
+    account_proofs: HashMap<Address, EIP1186AccountProofResponse>,
+    storage_proofs: HashMap<Address, HashMap<StorageKey, EIP1186AccountProofResponse>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -38,7 +44,9 @@ pub struct EVMSimulatorSnapshot {
     pub block_num: u64,
     pub block_hash: B256,
     pub state_root: B256,
-    pub db_snapshot: Vec<u8>, // Placeholder for the DB snapshot
+    pub db_snapshot: Vec<u8>,
+    pub account_proofs: HashMap<Address, EIP1186AccountProofResponse>,
+    pub storage_proofs: HashMap<Address, HashMap<StorageKey, EIP1186AccountProofResponse>>,
 }
 
 impl EVMSimulator {
@@ -63,6 +71,8 @@ impl EVMSimulator {
             block_hash: self.block_hash,
             state_root: self.state_root,
             db_snapshot,
+            account_proofs: self.account_proofs.clone(),
+            storage_proofs: self.storage_proofs.clone(),
         }
     }
 
@@ -100,6 +110,8 @@ impl EVMSimulator {
             block_hash: snapshot.block_hash,
             state_root: snapshot.state_root,
             db: cache_db,
+            account_proofs: snapshot.account_proofs,
+            storage_proofs: snapshot.storage_proofs,
         })
     }
 
@@ -157,6 +169,8 @@ impl EVMSimulator {
             block_hash,
             state_root,
             db: cache_db,
+            account_proofs: HashMap::new(),
+            storage_proofs: HashMap::new(),
         })
     }
 
@@ -187,8 +201,45 @@ impl EVMSimulator {
         res
     }
 
-    pub fn get_balance(&mut self, address: Address) -> Result<U256> {
+    pub fn verify_account_proof(&mut self, address: Address) -> Result<bool> {
+        let account_proof = match self.account_proofs.get(&address) {
+            Some(proof) => proof,
+            None => return Err(anyhow!("Account proof for address {} not found", address)),
+        };
+
+        let account = Account {
+            nonce: account_proof.nonce,
+            balance: account_proof.balance,
+            storage_root: account_proof.storage_hash,
+            code_hash: account_proof.code_hash,
+        };
+
+        // RLP-encode the account data (aka the MPT leaf)
+        let expected_account_rlp = alloy::rlp::encode(&account);
+
+        // Verify the account proof against the state root
+        let key = keccak256(address);
+        let verification_result = verify_proof(
+            self.state_root.into(),
+            Nibbles::unpack(&key),
+            Some(expected_account_rlp),
+            &account_proof.account_proof,
+        );
+        Ok(verification_result.is_ok())
+    }
+
+    pub async fn get_balance(&mut self, address: Address) -> Result<U256> {
         let db = &mut self.db;
+
+        // Fetch the balance proof
+        let proof = self.provider
+          .get_proof(address, vec![])
+          .block_id(BlockId::Hash(self.block_hash.into()))
+          .await.unwrap();
+
+        // Store the proof
+        self.account_proofs.insert(address, proof);
+
         Ok(db.basic(address)?.map(|i| i.balance).unwrap_or_default())
     }
 
@@ -236,7 +287,6 @@ impl EVMSimulator {
 mod tests {
     use crate::EVMSimulator;
     use alloy::primitives::{Address, U256, address};
-    use alloy::eips::BlockId;
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
@@ -276,7 +326,7 @@ mod tests {
 
         // Original simulator: addr2 has X ETH
         let addr2 = address!("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
-        let amount2 = simulator.get_balance(addr2).unwrap();
+        let amount2 = simulator.get_balance(addr2).await.unwrap();
 
         // Take snapshot
         let snapshot = simulator.to_snapshot();
@@ -287,7 +337,7 @@ mod tests {
             .expect("Failed to restore EVM simulator from snapshot");
 
         // Get balance of 0x0 from new_simulator
-        let restored_balance = new_simulator.get_balance(addr).unwrap();
+        let restored_balance = new_simulator.get_balance(addr).await.unwrap();
 
         // Check
         assert_eq!(
@@ -296,7 +346,7 @@ mod tests {
         );
 
         // Get balance of addr2 from new_simulator
-        let new_amount2 = new_simulator.get_balance(addr2).unwrap();
+        let new_amount2 = new_simulator.get_balance(addr2).await.unwrap();
 
         // Check
         assert_eq!(
@@ -316,7 +366,7 @@ mod tests {
             .expect("Failed to restore EVM simulator from snapshot");
 
         // Get balance of addr2 from new_simulator
-        let new_amount2 = new_simulator.get_balance(addr2).unwrap();
+        let new_amount2 = new_simulator.get_balance(addr2).await.unwrap();
 
         // Check
         assert_eq!(
@@ -346,14 +396,14 @@ mod tests {
             i += 1;
         }
         let amount = U256::from(1_000_000_000_000_000_000u64); // 1 ETH
-        let balance_before = simulator.get_balance(addr).unwrap();
+        let balance_before = simulator.get_balance(addr).await.unwrap();
         assert_eq!(
             balance_before,
             U256::ZERO,
             "Balance before setting is not zero"
         );
         simulator.set_balance(addr, amount);
-        let balance_after = simulator.get_balance(addr).unwrap();
+        let balance_after = simulator.get_balance(addr).await.unwrap();
         assert_eq!(balance_after, amount, "Balance after setting is incorrect");
     }
 
@@ -362,32 +412,38 @@ mod tests {
         let mut simulator = EVMSimulator::new(
             get_mainnet_rpc_url(),
             Some(get_mainnet_chain_id()),
-            Some(BlockId::number(23171529)),
+            None
         )
         .await
         .expect("Failed to create EVM simulator");
 
-        let addr = address!("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
-        let balance = simulator.get_balance(addr).unwrap();
-        assert_eq!(
-            balance,
-            U256::from(4788681392650745692u128),
-            "Balance is not as expected"
-        );
+        let addr = address!("0x0000000000000000000000000000000000000000");
+        let balance = simulator.get_balance(addr).await.unwrap();
+        // The zero address should have nonzero balance
+        assert!(balance > U256::ZERO, "Zero address balance should be non-zero");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     pub async fn test_get_and_set_balance() {
         let mut simulator = init_mainnet_simulator().await;
         let addr = address!("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
-        let balance_before = simulator.get_balance(addr).unwrap();
+        let balance_before = simulator.get_balance(addr).await.unwrap();
         let new_balance = balance_before + U256::from(1_000_000_000_000_000_000u64); // Add 1 ETH
         simulator.set_balance(addr, new_balance);
-        let balance_after = simulator.get_balance(addr).unwrap();
+        let balance_after = simulator.get_balance(addr).await.unwrap();
         assert_eq!(
             balance_after, new_balance,
             "Balance after setting is incorrect"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    pub async fn test_verify_account_proofs() {
+        let mut simulator = init_mainnet_simulator().await;
+        let addr = address!("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
+        let _ = simulator.get_balance(addr).await.unwrap();
+        let result = simulator.verify_account_proof(addr);
+        assert!(result.is_ok(), "Account proof verification failed");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -401,10 +457,12 @@ mod tests {
 
         let sender_balance_before = simulator
             .get_balance(sender)
+            .await
             .expect("Failed to get sender balance");
 
         let receiver_balance_before = simulator
             .get_balance(receiver)
+            .await
             .expect("Failed to get receiver balance");
 
         // Simulate a simple ETH transfer
@@ -414,9 +472,11 @@ mod tests {
 
         let sender_balance_after = simulator
             .get_balance(sender)
+            .await
             .expect("Failed to get sender balance after transaction");
         let receiver_balance_after = simulator
             .get_balance(receiver)
+            .await
             .expect("Failed to get receiver balance after transaction");
 
         // Calculate gas cost

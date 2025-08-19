@@ -9,6 +9,7 @@ repository = "https://github.com/weijiekoh/simulacrum"
 
 [dependencies]
 alloy = { version = "1.0.24", features = ["rlp", "serde"] }
+alloy-trie = "0.9.1"
 alloy-eips = "1.0.24"
 anyhow = "1.0.99"
 bincode = "1.3.3"
