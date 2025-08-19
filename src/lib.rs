@@ -1,6 +1,6 @@
 use alloy::eips::BlockId;
 use alloy::network::Ethereum;
-use alloy::primitives::{Address, KECCAK256_EMPTY, U256};
+use alloy::primitives::{Address, KECCAK256_EMPTY, U256, B256};
 use alloy::providers::{Provider, RootProvider};
 use anyhow::{Result, anyhow};
 use revm::context::result::{EVMError, ExecutionResult};
@@ -9,20 +9,36 @@ use revm::primitives::{TxKind, hash_map::Entry};
 use revm::state::AccountInfo;
 use revm::{Context, Database, ExecuteCommitEvm, MainBuilder, MainContext};
 use std::sync::Arc;
+use serde::{Serialize, Deserialize};
+use bincode::{serialize, deserialize};
 
 /* TODO:
 - [ ] Arbitrary contract calls
 - [ ] Arbitrary transaction execution
 - [ ] ERC20 balance queries, approvals, and transfers (convenience functions)
+- [ ] Account proofs
 */
 
 pub type HttpProvider = RootProvider<Ethereum>;
 
 pub struct EVMSimulator {
     pub provider: Arc<RootProvider<Ethereum>>,
+    pub provider_url: String,
     pub chain_id: u64,
-    pub block_number: u64,
+    pub block_num: u64,
+    pub block_hash: B256,
+    pub state_root: B256,
     db: CacheDB<WrapDatabaseAsync<AlloyDB<Ethereum, Arc<RootProvider<Ethereum>>>>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EVMSimulatorSnapshot {
+    pub provider: String,
+    pub chain_id: u64,
+    pub block_num: u64,
+    pub block_hash: B256,
+    pub state_root: B256,
+    pub db_snapshot: Vec<u8>, // Placeholder for the DB snapshot
 }
 
 impl EVMSimulator {
@@ -37,10 +53,60 @@ impl EVMSimulator {
         Ok(db.basic(address)?.unwrap())
     }
 
+    pub fn to_snapshot(&self) -> EVMSimulatorSnapshot {
+        let db_snapshot = serialize(&self.db.cache).expect("Failed to serialize DB cache");
+
+        EVMSimulatorSnapshot {
+            provider: self.provider_url.clone(),
+            chain_id: self.chain_id,
+            block_num: self.block_num,
+            block_hash: self.block_hash,
+            state_root: self.state_root,
+            db_snapshot,
+        }
+    }
+
+    pub async fn from_snapshot(snapshot: EVMSimulatorSnapshot) -> Result<Self> {
+        let provider = RootProvider::<Ethereum>::connect(&snapshot.provider).await?;
+        
+        // Verify the provider matches the snapshot
+        let provider_cid = provider.get_chain_id().await?;
+        if provider_cid != snapshot.chain_id {
+            return Err(anyhow!(
+                "Chain ID mismatch: expected {}, got {}",
+                snapshot.chain_id,
+                provider_cid
+            ));
+        }
+
+        // Set up the DB with the block from the snapshot
+        let block_id = BlockId::number(snapshot.block_num);
+        let provider_arc = Arc::new(provider);
+        let alloy_db = AlloyDB::new(provider_arc.clone(), block_id);
+        let wrapped_db = WrapDatabaseAsync::new(alloy_db).expect("Failed to wrap database");
+        let mut cache_db = CacheDB::new(wrapped_db);
+
+        // Restore the cached state from the snapshot
+        if !snapshot.db_snapshot.is_empty() {
+            let cached_state = deserialize(&snapshot.db_snapshot)?;
+            cache_db.cache = cached_state;
+        }
+
+        Ok(EVMSimulator {
+            provider: provider_arc,
+            provider_url: snapshot.provider,
+            chain_id: snapshot.chain_id,
+            block_num: snapshot.block_num,
+            block_hash: snapshot.block_hash,
+            state_root: snapshot.state_root,
+            db: cache_db,
+        })
+    }
+
     pub async fn new(
         rpc_url: String,
         chain_id: Option<u64>,
-        block_number: Option<u64>,
+        block_id: Option<BlockId>,
     ) -> Result<Self> {
         let provider = RootProvider::<Ethereum>::connect(&rpc_url).await?;
 
@@ -61,22 +127,21 @@ impl EVMSimulator {
             given_cid
         };
 
-        // If the block number is not provided, use the latest block number from the provider
-        let latest_block_number = provider.get_block_number().await?;
-        let bn = if block_number.is_none() {
-            latest_block_number
+        let block_id = if let Some(bid) = block_id {
+            bid
         } else {
-            let given_bn = block_number.unwrap();
-            if given_bn > latest_block_number {
-                return Err(anyhow!(
-                    "Block number mismatch: expected at most {}, got {}",
-                    latest_block_number,
-                    given_bn
-                ));
-            }
-            given_bn
+            BlockId::latest()
         };
-        let block_id = BlockId::number(bn);
+
+        // Fetch the block
+        let block_info = provider
+            .get_block(block_id)
+            .await?
+            .ok_or_else(|| anyhow!("Block not found for ID: {:?}", block_id))?;
+
+        let block_hash = block_info.header.hash;
+        let block_num = block_info.header.number;
+        let state_root = block_info.header.state_root;
 
         // Set up the DB
         let provider_arc = Arc::new(provider);
@@ -86,8 +151,11 @@ impl EVMSimulator {
 
         Ok(EVMSimulator {
             provider: provider_arc,
+            provider_url: rpc_url,
             chain_id: cid,
-            block_number: bn,
+            block_num,
+            block_hash,
+            state_root,
             db: cache_db,
         })
     }
@@ -168,6 +236,7 @@ impl EVMSimulator {
 mod tests {
     use crate::EVMSimulator;
     use alloy::primitives::{Address, U256, address};
+    use alloy::eips::BlockId;
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
@@ -195,6 +264,65 @@ mod tests {
         let mut bytes = [0u8; 20];
         rng.fill(&mut bytes);
         Address::from(bytes)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    pub async fn test_snapshot() {
+        // Original simulator: set 0x0 to have 1 ETH
+        let mut simulator = init_mainnet_simulator().await;
+        let addr = address!("0x0000000000000000000000000000000000000000");
+        let amount = U256::from(1_000_000_000_000_000_000u64); // 1 ETH
+        simulator.set_balance(addr, amount);
+
+        // Original simulator: addr2 has X ETH
+        let addr2 = address!("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
+        let amount2 = simulator.get_balance(addr2).unwrap();
+
+        // Take snapshot
+        let snapshot = simulator.to_snapshot();
+
+        // Restore snapshot
+        let mut new_simulator = EVMSimulator::from_snapshot(snapshot)
+            .await
+            .expect("Failed to restore EVM simulator from snapshot");
+
+        // Get balance of 0x0 from new_simulator
+        let restored_balance = new_simulator.get_balance(addr).unwrap();
+
+        // Check
+        assert_eq!(
+            restored_balance, amount,
+            "Restored balance does not match the original"
+        );
+
+        // Get balance of addr2 from new_simulator
+        let new_amount2 = new_simulator.get_balance(addr2).unwrap();
+
+        // Check
+        assert_eq!(
+            new_amount2, amount2,
+            "Restored balance for addr2 does not match the original"
+        );
+
+        // Original simulator: set balance of addr2 to a new amount
+        simulator.set_balance(addr2, amount2 + amount);
+
+        // Take snapshot
+        let snapshot = simulator.to_snapshot();
+
+        // Restore snapshot
+        new_simulator = EVMSimulator::from_snapshot(snapshot)
+            .await
+            .expect("Failed to restore EVM simulator from snapshot");
+
+        // Get balance of addr2 from new_simulator
+        let new_amount2 = new_simulator.get_balance(addr2).unwrap();
+
+        // Check
+        assert_eq!(
+            new_amount2, amount2 + amount,
+            "Restored balance for addr2 after update does not match the original"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -227,6 +355,25 @@ mod tests {
         simulator.set_balance(addr, amount);
         let balance_after = simulator.get_balance(addr).unwrap();
         assert_eq!(balance_after, amount, "Balance after setting is incorrect");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    pub async fn test_init_evmsimulator_with_block_id() {
+        let mut simulator = EVMSimulator::new(
+            get_mainnet_rpc_url(),
+            Some(get_mainnet_chain_id()),
+            Some(BlockId::number(23171529)),
+        )
+        .await
+        .expect("Failed to create EVM simulator");
+
+        let addr = address!("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
+        let balance = simulator.get_balance(addr).unwrap();
+        assert_eq!(
+            balance,
+            U256::from(4788681392650745692u128),
+            "Balance is not as expected"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
