@@ -1,9 +1,11 @@
 use alloy::eips::BlockId;
 use alloy::network::Ethereum;
-use alloy::primitives::{Address, keccak256, KECCAK256_EMPTY, U256, B256, aliases::StorageKey};
+use alloy::primitives::{Address, keccak256, KECCAK256_EMPTY, U256, B256, aliases::StorageKey, Bytes};
 use alloy::rpc::types::EIP1186AccountProofResponse;
 use alloy::providers::{Provider, RootProvider};
 use alloy::consensus::Account;
+use alloy::sol;
+use alloy::sol_types::SolCall;
 use alloy_trie::{Nibbles, proof::verify_proof};
 use anyhow::{Result, anyhow};
 use revm::context::result::{EVMError, ExecutionResult};
@@ -20,8 +22,22 @@ use std::collections::HashMap;
 - [ ] Arbitrary contract calls
 - [ ] Arbitrary transaction execution
 - [ ] ERC20 balance queries, approvals, and transfers (convenience functions)
-- [ ] Account proofs
 */
+
+sol! {
+    #[sol(rpc)]
+    interface IERC20 {
+        function balanceOf(address account) external view returns (uint256);
+        function totalSupply() external view returns (uint256);
+        function decimals() external view returns (uint8);
+        function symbol() external view returns (string);
+        function name() external view returns (string);
+        function allowance(address owner, address spender) external view returns (uint256);
+        function transfer(address to, uint256 amount) external returns (bool);
+        function approve(address spender, uint256 amount) external returns (bool);
+        function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    }
+}
 
 pub type HttpProvider = RootProvider<Ethereum>;
 
@@ -57,7 +73,6 @@ impl EVMSimulator {
 
     fn query_rpc_or_retrieve(&mut self, address: Address) -> Result<AccountInfo> {
         let db = &mut self.db;
-        // TODO: Handle the case where the account is not found in the local cache
         Ok(db.basic(address)?.unwrap())
     }
 
@@ -175,6 +190,7 @@ impl EVMSimulator {
     }
 
     // TODO: implement a way to specify either gas_price or EIP1559 parameters
+    // TODO: implement a way to mark the account proof as modified-in-simulation
     pub fn transfer_eth(
         &mut self,
         from: Address,
@@ -281,17 +297,128 @@ impl EVMSimulator {
         };
         Ok(x)
     }
+
+    pub async fn erc20_balance_of(&mut self, token_address: Address, account: Address) -> Result<U256> {
+        let contract = IERC20::new(token_address, &*self.provider);
+        let result = contract.balanceOf(account).call().await?;
+
+        // TODO: fix
+        //// Calculate storage key for ERC20 balance mapping
+        //// Most ERC20 tokens store balances in slot 0: mapping(address => uint256) balances
+        //let balance_slot = U256::ZERO;
+        //let storage_key = keccak256((account, balance_slot).abi_encode());
+
+        //// Fetch the storage proof for the balance
+        //let proof = self.provider
+            //.get_proof(token_address, vec![storage_key])
+            //.block_id(BlockId::Hash(self.block_hash.into()))
+            //.await?;
+
+        //// Store the storage proof
+        //self.storage_proofs
+            //.entry(token_address)
+            //.or_insert_with(HashMap::new)
+            //.insert(storage_key, proof);
+
+        // TODO: implement a way to update the storage proof or mark it as modified-in-simulation
+        Ok(result)
+    }
+
+    pub async fn erc20_token_info(&mut self, token_address: Address) -> Result<(String, String, u8, U256)> {
+        let contract = IERC20::new(token_address, &*self.provider);
+        
+        let name_result = contract.name().call().await?;
+        let symbol_result = contract.symbol().call().await?;
+        let decimals_result = contract.decimals().call().await?;
+        let total_supply_result = contract.totalSupply().call().await?;
+
+        Ok((
+            name_result,
+            symbol_result,
+            decimals_result,
+            total_supply_result,
+        ))
+    }
+
+    pub fn erc20_transfer(
+        &mut self,
+        token_address: Address,
+        from: Address,
+        to: Address,
+        amount: U256,
+        gas_price: u128,
+    ) -> Result<ExecutionResult, EVMError<DBTransportError>> {
+        // Encode the transfer function call
+        let transfer_call = IERC20::transferCall { to, amount };
+        let call_data = transfer_call.abi_encode();
+
+        // Get sender info for nonce
+        let sender_info = self.query_rpc_or_retrieve(from).map_err(|e| EVMError::Custom(format!("Failed to get sender info: {}", e)))?;
+        let sender_nonce = sender_info.nonce;
+
+        let db = &mut self.db;
+        let mut evm = Context::mainnet().with_db(db).build_mainnet();
+
+        // Set up transaction
+        evm.ctx.tx.caller = from;
+        evm.ctx.tx.kind = TxKind::Call(token_address);
+        evm.ctx.tx.value = U256::ZERO; // ERC20 transfers don't send ETH
+        evm.ctx.tx.data = Bytes::from(call_data);
+        evm.ctx.tx.gas_limit = 100_000; // Standard ERC20 transfer gas limit
+        evm.ctx.tx.gas_price = gas_price;
+        evm.ctx.tx.nonce = sender_nonce;
+        evm.ctx.tx.chain_id = Some(self.chain_id);
+
+        evm.transact_commit(evm.ctx.tx.clone())
+    }
+
+    pub fn erc20_approve(
+        &mut self,
+        token_address: Address,
+        from: Address,
+        spender: Address,
+        amount: U256,
+        gas_price: u128,
+    ) -> Result<ExecutionResult, EVMError<DBTransportError>> {
+        // Encode the approve function call
+        let approve_call = IERC20::approveCall { spender, amount };
+        let call_data = approve_call.abi_encode();
+
+        // Get sender info for nonce
+        let sender_info = self.query_rpc_or_retrieve(from).map_err(|e| EVMError::Custom(format!("Failed to get sender info: {}", e)))?;
+        let sender_nonce = sender_info.nonce;
+
+        let db = &mut self.db;
+        let mut evm = Context::mainnet().with_db(db).build_mainnet();
+
+        // Set up transaction
+        evm.ctx.tx.caller = from;
+        evm.ctx.tx.kind = TxKind::Call(token_address);
+        evm.ctx.tx.value = U256::ZERO;
+        evm.ctx.tx.data = Bytes::from(call_data);
+        evm.ctx.tx.gas_limit = 100_000;
+        evm.ctx.tx.gas_price = gas_price;
+        evm.ctx.tx.nonce = sender_nonce;
+        evm.ctx.tx.chain_id = Some(self.chain_id);
+
+        evm.transact_commit(evm.ctx.tx.clone())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::EVMSimulator;
-    use alloy::primitives::{Address, U256, address};
+    use alloy::primitives::{Address, U256, address };
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     fn get_mainnet_rpc_url() -> String {
-        "https://eth.llamarpc.com".to_string()
+        // Load .env file if it exists
+        dotenv::dotenv().ok();
+        
+        // Try to get RPC URL from environment variable first, fallback to public RPC
+        std::env::var("ETHEREUM_RPC_URL")
+            .unwrap_or_else(|_| "https://eth.llamarpc.com".to_string())
     }
 
     fn get_mainnet_chain_id() -> u64 {
@@ -299,8 +426,9 @@ mod tests {
     }
 
     async fn init_mainnet_simulator() -> EVMSimulator {
+        let url = get_mainnet_rpc_url();
         let simulator = EVMSimulator::new(
-            get_mainnet_rpc_url(),
+            url,
             Some(get_mainnet_chain_id()),
             None, // None should default to the latest block number
         )
@@ -494,4 +622,74 @@ mod tests {
             "Receiver balance after transaction is incorrect"
         );
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    pub async fn test_erc20_balance_query() {
+        let mut simulator = init_mainnet_simulator().await;
+        
+        // USDC contract on mainnet
+        let usdc_address = address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        let test_account = address!("0x0000000000000000000000000000000000000000");
+        
+        let balance = simulator
+            .erc20_balance_of(usdc_address, test_account)
+            .await
+            .expect("Failed to query ERC20 balance");
+        
+        assert!(balance >= U256::ZERO, "Balance should be non-negative");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    pub async fn test_erc20_token_info() {
+        let mut simulator = init_mainnet_simulator().await;
+        
+        // USDC contract on mainnet
+        let usdc_address = address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        
+        let (name, symbol, decimals, total_supply) = simulator
+            .erc20_token_info(usdc_address)
+            .await
+            .expect("Failed to query ERC20 token info");
+        
+        assert_eq!(symbol, "USDC");
+        assert_eq!(decimals, 6);
+        assert!(!name.is_empty());
+        assert!(total_supply > U256::ZERO);
+    }
+
+    //#[tokio::test(flavor = "multi_thread")]
+    //pub async fn test_erc20_storage_proof() {
+        //let mut simulator = init_mainnet_simulator().await;
+        
+        //// USDC contract on mainnet
+        //let usdc_address = address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        //let test_account = address!("0x0000000000000000000000000000000000000000");
+        
+        //// Query balance (which should fetch and store the storage proof)
+        //let _balance = simulator
+            //.erc20_balance_of(usdc_address, test_account)
+            //.await
+            //.expect("Failed to query ERC20 balance");
+        
+        //// Verify that storage proof was stored
+        //assert!(
+            //simulator.storage_proofs.contains_key(&usdc_address),
+            //"Storage proof should be stored for the token contract"
+        //);
+        
+        //let contract_storage_proofs = simulator.storage_proofs.get(&usdc_address).unwrap();
+        //assert!(
+            // !contract_storage_proofs.is_empty(),
+            //"At least one storage proof should be stored"
+        //);
+        
+        //// Calculate the expected storage key for the balance
+        //let balance_slot = U256::ZERO;
+        //let storage_key = keccak256((test_account, balance_slot).abi_encode());
+        
+        //assert!(
+            //contract_storage_proofs.contains_key(&storage_key),
+            //"Storage proof for the balance should be stored"
+        //);
+    //}
 }
