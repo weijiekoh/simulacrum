@@ -10,7 +10,7 @@ This project was inspired by [simular-core](https://github.com/simular-fi/simula
 - [x] Simple ETH transfers
 - [ ] Arbitrary contract calls
 - [ ] Arbitrary transaction execution
-- [ ] ERC20 balance queries, approvals, and transfers (convenience functions)
+- [x] ERC20 balance queries, approvals, and transfers (convenience functions)
 - [ ] Documentation (see `src/lib.rs` for now)
 
 ## Quick start
