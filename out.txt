@@ -1,0 +1,28 @@
+
+running 1 test
+CALL to: 0x57ab1ec28d129707052df4df418d58a2d46d5f51
+Value: 0
+Input data length: 36
+SLOAD detected - storage read operation
+stack length: 4
+CALL to: 0x10a5f7d9d65bcc2734763444d4940a31b109275f
+Value: 0
+Input data length: 36
+SLOAD detected - storage read operation
+stack length: 5
+CALL to: 0x05a9cbe762b36632b3594da4f082340e0e5343e8
+Value: 0
+Input data length: 36
+SLOAD detected - storage read operation
+stack length: 3
+CALL ended
+outcome.result: InterpreterResult { result: Return, output: 0x0000000000000000000000000000000000000000000018d39a91da4c8e0c3000, gas: Gas { limit: 65691, remaining: 63194, refunded: 0, memory: MemoryGas { words_num: 5, expansion_cost: 15 } } }
+CALL ended
+outcome.result: InterpreterResult { result: Return, output: 0x0000000000000000000000000000000000000000000018d39a91da4c8e0c3000, gas: Gas { limit: 72032, remaining: 64101, refunded: 0, memory: MemoryGas { words_num: 6, expansion_cost: 18 } } }
+CALL ended
+outcome.result: InterpreterResult { result: Return, output: 0x0000000000000000000000000000000000000000000018d39a91da4c8e0c3000, gas: Gas { limit: 78568, remaining: 65113, refunded: 0, memory: MemoryGas { words_num: 6, expansion_cost: 18 } } }
+token balance: 117240196511800000000000
+test tests::test_erc20_balance_query_tokenstate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 2.16s
+

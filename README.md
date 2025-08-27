@@ -20,3 +20,13 @@ Clone this repository and run:
 ```bash
 cargo test
 ```
+
+## Notes
+
+Initial state: block B
+
+Transaction(s) -> T0, T1, ..., Tn
+
+Final state: F
+
+Need to trace each T0 to Tn and get the proofs of each touched slot and each touched balance.
