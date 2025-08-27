@@ -21,6 +21,12 @@ Clone this repository and run:
 cargo test
 ```
 
+To use another Ethereum node for testing, set the `ETHEREUM_RPC_URL` environment variable:
+
+```bash
+ETHEREUM_RPC_URL=https://ethereum-rpc.publicnode.com cargo test
+```
+
 ## Notes
 
 Initial state: block B

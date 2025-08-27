@@ -1036,7 +1036,7 @@ mod tests {
         let token_address = address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
 
         // Test accounts - using address that has positive USDC balance
-        let from = address!("0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c"); // Account with existing USDC balance
+        let from = address!("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"); // Account with existing USDC balance
         let to = address!("0x742d35Cc662C910EF7B5BdD2C90B5948a5d8EBB6"); // Recipient address
 
         // Set some ETH balance for the sender to pay for gas
@@ -1095,7 +1095,7 @@ mod tests {
         let token_address = address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
 
         // Test accounts - using address that has positive USDC balance
-        let owner = address!("0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c"); // Token owner with existing USDC balance
+        let owner = address!("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"); // Token owner with existing USDC balance
         let spender = address!("0x742d35Cc662C910EF7B5BdD2C90B5948a5d8EBB6"); // Account doing the transfer
         let recipient = address!("0x1234567890123456789012345678901234567890"); // Transfer recipient
 
