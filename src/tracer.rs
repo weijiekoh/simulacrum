@@ -9,12 +9,15 @@ use revm::{
     Inspector,
     primitives::{Address, Log, U256},
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 pub struct AccessTracer {
     // Track storage slots accessed per address
     pub storage_accesses: HashMap<Address, HashSet<U256>>,
+
+    // Track accounts accessed
     pub account_accesses: HashSet<Address>,
 
     // The address of the contract currently being called or executed
@@ -60,7 +63,6 @@ where
         );
 
         let addr = self.current_target.unwrap();
-
         let opcode = interp.bytecode.opcode();
 
         match opcode {
